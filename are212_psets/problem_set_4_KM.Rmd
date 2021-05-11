@@ -1,0 +1,490 @@
+---
+title: "ARE 212 - Problem Set 4"
+author: "Kendra Marcoux, Lucy Hackett, Hikari Murayama, Trevor Woolley, Yuliya Borodina, Hamza Husain"
+date: "3/10/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+rm(list = ls())
+```
+
+#### Functions
+Before I start the analysis I am going to set up a few functions that I will use later on. 
+
+```{r functions}
+
+format_it <- function(plot, title, xname, yname, xlabel, ylabel, ...){  
+  plot +
+    scale_y_continuous(expand = c(0, 0), labels = ylabel) +
+    scale_x_continuous(labels = xlabel) +
+    theme_classic() +
+    labs(title = title,
+         x = xname,
+         y = yname) +
+    theme(plot.title = element_text(size = 14, face = "bold", hjust = .5))
+}
+histogrammable <- function(df, var, title, xname, yname, xlabel, ylabel){
+  format_it(df %>% 
+              ggplot(aes(x=!!sym(var))) +
+              geom_histogram(bins = 15), 
+            title, xname, yname, xlabel, ylabel)
+}
+regressive_habits <- function(df, yvar, constant, xvar){
+  
+  x <- pull(df, !!sym(xvar[[1]])) %>% 
+    na.omit()
+  if(NROW(xvar)>1){
+    for (vars in 2:NROW(xvar)){
+      x <- x %>% 
+        bind_cols(pull(df, !!sym(xvar[[vars]])) %>% 
+                    na.omit())
+    }
+  }
+  
+  y <- pull(df, !!sym(yvar)) %>% 
+    na.omit()
+  
+  if(constant == "constant"){
+    x <- as.matrix(bind_cols(1, x))
+    m0 <- diag(1, NROW(x)) - 1/NROW(x)*rep(1, NROW(x))%*%t(rep(1, NROW(x)))
+    xnames <- append("(Intercept)", xvar)
+  } else {
+    x <- as.matrix(x)
+    m0 <- diag(1, NROW(x))
+    xnames <- xvar
+  }
+
+  b_coeff <- solve(t(x)%*%x)%*%t(x)%*%y 
+  yhat <- x%*%b_coeff
+  e <- y-yhat
+  se <- sqrt(diag(solve(t(x)%*%x)*as.numeric(t(e)%*%e)/(NROW(x) - NCOL(x))))
+  white_var <- solve(t(x)%*%x)%*%t(x)%*%diag(diag((e%*%t(e))))%*%x%*%solve(t(x)%*%x)
+  white_se <- sqrt(diag(white_var))
+  t_stat <- b_coeff/se
+  sst <- t(y%*%m0%*%y)
+  ssr <- t(e)%*%e
+  sse <- t(b_coeff)%*%t(x)%*%m0%*%x%*%b_coeff
+  r_sqr <- 1-ssr/sst
+  r_sqr_adj <- 1 - ((NROW(x)-1)/(NROW(x) - NCOL(x)))*(1-r_sqr)
+  bic <- log(t(e)%*%e/NROW(x))+NCOL(x)/NROW(x)*log(NROW(x))
+  aic <- log(t(e)%*%e/NROW(x))+2*NCOL(x)/NROW(x)
+  coeff_mat <- as.matrix(bind_cols(b_coeff, se, t_stat))
+  colnames(coeff_mat) <- c("coefficient","std. error", "t-stat")
+  rownames(coeff_mat) <- xnames
+  white_coeff_mat <- as.matrix(bind_cols(b_coeff, se, white_se))
+  colnames(white_coeff_mat) <- c("coefficient","ols std. error","white std. error")
+  rownames(white_coeff_mat) <- xnames
+  
+  list("coeff_mat" = coeff_mat,
+       "white_coeff_mat" = white_coeff_mat,
+       "xmat" = x,
+       "white_var" = white_var,
+       "n" = NROW(x),
+       "n_minus_k" = NROW(x) - NCOL(x),
+       "sst" = sst,
+       "ssr" = ssr,
+       "sse" = sse,
+       "yhat" = yhat,
+       "e" = e,
+       "r_sqr" = r_sqr,
+       "r_sqr_adj" = r_sqr_adj,
+       "bic" = bic,
+       "aic" = aic)
+}
+
+the_last_oG <- function(reg) {
+  coeffs <- reg$coeff_mat[,1]
+  if(grepl("(Intercept)", list(names(coeffs)))) {
+    coeffs <- coeffs[-1]
+  }
+  gamma_hat <- log(3*coeffs[[2]]+5)*(coeffs[[4]]-2*coeffs[[5]])
+  
+  G_mat <- bind_cols(0,
+                     0,
+                     (3*(coeffs[[4]]-2*coeffs[[5]]))/(3*coeffs[[2]]+5),
+                     0,
+                     log(3*coeffs[[2]]+5),
+                     -2*log(3*coeffs[[2]]+5),
+                     0) %>% 
+    as.matrix()
+  white_se <- sqrt(diag(G_mat%*%reg$white_var%*%t(G_mat)))
+  out <- list("gamma_hat"=gamma_hat,
+              "white_se" = white_se)
+}
+
+iv_drip <- function(df, yvar, constant, x_k, instrument, xvar) {
+  z_vars <- append(xvar, instrument)
+  z <- as.matrix(bind_cols(1, pull(df, !!sym(z_vars[[1]]))))
+  if(NROW(z_vars)>1){
+    for (vars in 2:NROW(z_vars)){
+      z <- as.matrix(z %>% 
+                       bind_cols(pull(df, !!sym(z_vars[[vars]])) %>% 
+                                   na.omit()))
+    }
+  }
+  x <- as.matrix(bind_cols(1, pull(df, !!sym(x_k)), z[,2:(NROW(xvar)+1)]))
+  y <- pull(df, !!sym(yvar))
+  b_coeff <- solve(t(z)%*%x)%*%t(z)%*%y
+  e <- y - x %*% b_coeff
+  iv_se <- sqrt(diag(solve(t(x)%*%z%*%solve(t(z)%*%z)%*%t(z)%*%x)*
+    as.numeric(t(e)%*%e)/(NROW(x)-NCOL(x))))
+  coeff_mat <- as.matrix(bind_cols(b_coeff, iv_se))
+  colnames(coeff_mat) <- c("coefficient","std. error")
+  rownames(coeff_mat) <- append("(Intercept)",append(x_k,xvar))
+  coeff_mat
+}
+
+lets_take_it_to_the_stage <- function(df, yvar, constant, x_k, instrument, xvar) {
+  
+  red_form_xvars1 <- append(instrument, xvar)
+  red_form_xk <- regressive_habits(df, x_k, constant, red_form_xvars1)
+  
+  x_k_vec <- pull(df, !!sym(x_k)) 
+  df <- df %>%
+    mutate(!!x_k := red_form_xk$yhat) 
+  
+  red_form_xvars2 <- append(x_k, xvar)
+  red_form_y <- regressive_habits(df, yvar, constant, red_form_xvars2)
+  
+  z <- as.matrix(bind_cols(1, red_form_y$xmat[,-c(1,2)], pull(df, !!sym(instrument[[1]]))))
+  if(NROW(instrument)>1){
+    for (vars in 2:NROW(instrument)){ 
+      z <- as.matrix(z %>%
+                       bind_cols(pull(df, !!sym(instrument[[vars]])) %>% na.omit()))
+      } 
+  }
+  x <- as.matrix(bind_cols(1, x_k_vec, red_form_y$xmat[,-c(1,2)])) 
+  red_form_y$e <- pull(df, !!sym(yvar)) - x %*% red_form_y$coeff_mat[,1] 
+  iv_se <- sqrt(diag(solve(t(x)%*%z%*%solve(t(z)%*%z)%*%t(z)%*%x)*
+                       as.numeric(t(red_form_y$e)%*%red_form_y$e)/red_form_y$n_minus_k)) 
+  red_form_y$coeff_mat <- as.matrix(bind_cols(red_form_y$coeff_mat[,1],iv_se)) 
+  colnames(red_form_y$coeff_mat) <- c("coefficient","std. error")
+  rownames(red_form_y$coeff_mat) <- append("(Intercept)",red_form_xvars2)
+  red_form_y 
+}
+
+
+breusch_godfrey_test <- function(df, yvar, constant, xvar, order){
+  reg1 <- regressive_habits(df, yvar, constant, xvar)
+  
+  df <- df %>% 
+      mutate(resid=as.numeric(reg1$e))
+  
+  resid_list <- c()
+  for (i in 1:order){
+    df <- df %>% 
+      mutate(!!paste0("resid_",i):=as.numeric(lag(reg1$e, i)))
+    resid_list <- append(resid_list, paste0("resid_",i))
+  }
+  df[is.na(df)] <- 0
+  xvar <- append(xvar, resid_list)
+  final_reg <- regressive_habits(df, "resid", "constant", xvar)
+  test_stat <- nrow(df)*final_reg$r_sqr
+}
+
+the_sims_livin_large <- function(n){
+  x_i <- rnorm(n,0,1) 
+  epsilon_i <- rnorm(n, 0,2)
+  true_theta <- c(1,5,4)
+  y <- true_theta[1] +true_theta[2]*x_i+epsilon_i
+  
+  x <- as.matrix(bind_cols(1, x_i))
+  b_coeff <- solve(t(x)%*%x)%*%t(x)%*%y
+  e_hat <- y-x%*%b_coeff
+  s2 <- t(e_hat)%*%e_hat/n
+  bias <- s2 - true_theta[3]
+  tibble(n= n, bias = bias)
+}
+
+
+```
+
+
+```{r load data, warning=F}
+
+#Load libraries
+library(pacman)
+p_load(dplyr, haven, readr, knitr, psych, ggplot2,stats4, stargazer, lmSupport, magrittr, 
+       qwraps2, Jmisc, qwraps2, rlang, dataCompareR, purrr, tinytex, sandwich, lmtest)
+#tinytex::install_tinytex()
+
+#Set directory
+dir <- "~/Documents/First Year/ARE 212/are212-group3/problemSet4"
+setwd(dir)
+
+#Load raw data
+raw_data <- read_dta("Data/pset4-2021.dta")
+raw_fish_data <- read_dta("Data/fishdata.dta")
+
+educ_data <- raw_data %>% 
+  mutate(lwage1 = log(wage1),
+         age_2 = age^2,
+         educ_2 = educ^2,
+         exp_2 = exp^2,
+         age_4 = age^4)
+```
+
+
+### Exercise 1
+
+We would like to estimate the model of the returns to education in terms of log wages from the first wave
+(wage1) : 
+$$\log(wage1)_i=\beta_0+exper_i\beta_1+educ_i\beta_2+minority_i\beta_3+age_i\beta_4+age_i^2\beta_5+male_i\beta_6+\epsilon_i$$
+
+#### 1.) Estimate the model above in (eq.1) via OLS.
+
+```{r q1, warning=F, message=F}
+reg1 <- regressive_habits(educ_data, "lwage1","constant",
+                          c("exp","educ","minority","age","age_2","male"))
+reg1$coeff_mat
+```
+
+#### 2.) Conduct a White - test for heteroskedasticity (see notes, please). Use levels, interactions and second order terms only of the regressors in (eq.1). Please use the canned lm package after you construct the white regressors and regressands. Do we have a problem?
+```{r q2}
+
+white_test_df <- bind_cols(educ_data,
+                           e = reg1$e) %>% 
+  mutate(e_2 = e^2)
+  
+white_reg <- lm(e_2 ~ (exp + educ + minority + age + age_2 + male)^2 + educ_2 + exp_2 + age_4, 
+                data = white_test_df)
+summary(white_reg)
+
+n_r2 <- summary(white_reg)$r.squared*nrow(white_test_df)
+p_val_white_test <- pchisq(n_r2, df = NROW(white_reg$coefficients)-1, lower.tail = F)
+```
+Our p-value for the White test is `r p_val_white_test`, and thus we can reject the null hypothesis that there is no heteroskedasticity. 
+
+#### 3.) Calculate the White robust standard errors. Comment on how they compare to the traditional OLS standard errors. Is this the right way to go about dealing with potential heterogeneity problems? $\\$
+```{r q3}
+reg1$white_coeff_mat
+```
+We can see that the white standard errors are smaller than the traditional OLS standard errors. Using White standard errors will helps to ensure that we will not reject a true null hypothesis due to heteroskedasticity, but it does nothing to correct for the possible inconsistency of our estimator. 
+
+#### 4.) Suppose that there is a model where a structural parameter of interest $\gamma$ is defined as $\gamma = g(\beta) = log(3\beta_2 + 5)(\beta_4-2\beta_5)$. Using the OLS estimation results, calculate $\hat{\gamma}$ and its robust white standard error (hint: think Delta Method, define G as matrix of first derivatives of g() and then robust white variance $V_\gamma<-G\%\ast\%V b1_{whiteRobust}\%\ast\%t(G))$. $\vspace{.1 in}\\$
+
+```{r q4, message=F, warning=F}
+gamma_hat <- the_last_oG(reg1)["gamma_hat"]
+gamma_rse <- the_last_oG(reg1)["white_se"]
+```
+Our matrix G is the first derivatives of $\gamma$ and can be given by:
+$$G=\begin{bmatrix}0&0&\frac{3(\beta_4-2\beta_5)}{3\beta_2+5}&0&\log(3\beta_2+5)&-2log(3\beta_2+5)&0\end{bmatrix}$$
+We have that our estimate for $\hat{\gamma}$ is given by `r gamma_hat` and the robust white standard error for $\hat{\gamma}$ is given by `r gamma_rse`.
+
+### Exercise 2
+Let the equation (eq.1) be the linear model of the returns to education in terms of log wages from the first wave: log(wage1) as before. Given the OLS estimates
+
+#### 1.) Please interpret your results in terms of the education variable educ OLS coefficent. $\vspace{.1 in}\\$
+
+```{r E2q1, echo=F}
+educ_coeff <- reg1$coeff_mat["educ",1]
+educ_coeff_perc <- scales::percent(educ_coeff, .01)
+```
+
+Our OLS $\beta_{educ}$ from equation (1) is `r educ_coeff`. This can be interpretted to mean that an additional year of schooling is associated with a `r educ_coeff_perc` increase in annual salaries during t=1.
+
+#### 2.) There are factors that make you go to school that could also be correlated with earning higher wages. Please list a couple of such factors. Explain briefly why these omitted variables would cause the OLS estimate of equation (eq.1) to be biased for the true effect of one extra year of education (using omitted variable bias approach), and why we cannot say that we are changing one year of education holding everything else constant in the OLS approach.$\vspace{.1 in}\\$
+
+There are plenty of other factors that are correlated with both education and wages. Such factors include the your parents income, the educational level of your parents or family members, and the town or school system that you grew up in. All of these factors may encourage you to attend more years of school but could also be correlated with your family's income and connections which may help you to get a higher paying job. Seeing as we are not controlling for any of these factors in our OLS regression in equation 1, our coefficient for $\beta_{educ}$ may have a positive bias, and does not represent the true impact of an additional year of schooling on wages. 
+
+#### 3.) By the way, if we omit experience from equation (eq.1) how does your OLS estimate of the returns to education change? What does this imply about the covariance between education and experience?$\vspace{.1 in}\\$
+
+```{r E2q3, message=F, warning=F}
+reg2 <- regressive_habits(educ_data, "lwage1","constant",
+                          c("educ","minority","age","age_2","male"))
+```
+```{r E2q3p2, echo=F}
+with_exp_educ_coeff <- reg1$coeff_mat["educ",1]
+wo_exp_educ_coeff <- reg2$coeff_mat["educ",1]
+```
+If we omit experience from the regression in equation 1, our $\beta_{educ}$ coefficient decreases from `r with_exp_educ_coeff` to `r wo_exp_educ_coeff`. This implies that experience and education are negatively correlated, and thus when we do not control for experience, our $\beta_{educ}$ coefficient will be negatively biased. 
+
+### Exercise 3
+
+Specify an (eq.2) that is the linear model of the effect of the program on years of schooling (education) with the same other regressors than equation (eq.1) as follows
+$$educ_i=\alpha_0+exper_i\alpha_1+minority_i\alpha_2+age_i\alpha_3+age^2_1\alpha_4+male_i\alpha_5+Treat_i\alpha_6+v_i$$
+Please estimate this model by OLS and interpret your results in terms of the Treatment variable coefficient, namely the coefficient of Treat.$\\$
+```{r E3, message=F}
+reg3 <- regressive_habits(educ_data, "educ","constant", 
+                          c("exp","minority","age","age_2","male","treat"))
+reg3$coeff_mat
+```
+```{r E3p2, echo=F}
+treat_coeff_educ <- reg3$coeff_mat["treat",1]
+```
+Our estimate for $\alpha_{treat}$ is `r treat_coeff_educ`. This can be interpreted to mean that holding experience, minority, age, age squared,and male constant, the individuals in the treatment group attained, on average, `r treat_coeff_educ` additional years of education as compared with those students in the control group. 
+
+### Exercise 4
+Specify an (eq.3) that is the linear model of the effect of the program on log wages from the first wave: log(wage1), with the same other regressors than equation (eq.2) as follows
+$$\log(wage1)_i=\delta_0+exper_i\delta_1+minority_i\delta_2+age_i\delta_3+age_i^2\delta_4+male_i\delta_5+Treat_i\delta_6+u_i$$
+This is called the reduced form model for log wages. Please estimate this model by OLS and interpret the results in terms of the Treatment variable coefficent of this reduced form regression, namely the coefficient of Treat.$\\$
+```{r E4, message=F}
+reg4 <- regressive_habits(educ_data, "lwage1","constant", 
+                          c("exp","minority","age","age_2","male","treat"))
+reg4$coeff_mat
+```
+```{r E4p2, echo=F}
+treat_coeff_wages <- reg4$coeff_mat["treat",1]
+treat_coeff_wages_perc <- scales::percent(treat_coeff_wages, .01)
+```
+Our estimate for $\delta_{treat}$ is `r treat_coeff_wages`. This can be interpreted to mean that holding experience, minority, age, age squared,and male constant, the individuals in the treatment group earned, on average, `r treat_coeff_wages_perc` higher annual salaries during t=1 compared with those students in the control group. 
+
+### Exercise 5 
+
+So far we have estimated returns to education using ordinary least squares (OLS). This experimental setting, however, provides an opportunity to measure the returns to schooling using instrumental variables ( IV, 2SLS, two stage least squares). Even though equation (eq.1) has a lot of regressors controlling for factors that could affect log wage, we are worried that educ could be correlated with factors affecting log(wage1) that are not controlled for in the linear model in equation (eq.1), namely with $\epsilon_i$. 
+
+#### 1.) Estimate equation (eq.1) by Instrumental variables using the variable Treat as an instrument for educ. Please interpret the IV estimate of the educ coefficient. (For this one use matrix algebra, not canned packages, please)$\\$
+
+```{r E5q1, message=F}
+reg5_iv <- iv_drip(educ_data,"lwage1","constant", "educ",c("treat"),
+                   c("exp","minority","age","age_2","male"))
+
+reg5_iv
+```
+```{r E5q1p2, echo=F}
+educ_coeff_iv <- reg5_iv["educ",1]
+educ_coeff_iv_perc <- scales::percent(educ_coeff_iv, .01)
+```
+The coefficient $\beta_{educ}$ is `r educ_coeff_iv` and tells us that an additional year of education is associated with an increase in period 1 annual salaries of `r educ_coeff_iv_perc`.
+
+#### 2.) Estimate the first-stage regression and in the second stage substitute for education the predicted values of the first-stage regression. Please interpret the 2SLS estimate of the educ coefficient.$\\$
+ 
+```{r E5q2, message=F}
+reg6_stage_1 <- regressive_habits(educ_data,"educ","constant",
+                                  c("exp","minority","age","age_2","male","treat"))
+educ_data <- educ_data %>% 
+  mutate(educ_xhat = reg6_stage_1$yhat,
+         educ_resid = reg6_stage_1$e)
+reg6_stage_2 <- regressive_habits(educ_data,"lwage1","constant",
+                                  c("exp","minority","age","age_2","male","educ_xhat"))
+reg6_stage_2$coeff_mat
+```
+Here we can see that our coefficients match the IV exercise and have thus can be interpreted the same way. 
+
+#### 3.) Estimate the first-stage regression and in the second stage use education (not the predicted education values of the first-stage regression as above) and also include the residuals from the first stage in the second stage, following thus a control function approach.$\\$
+```{r E5q3, message=F}
+reg7_stage_2 <- regressive_habits(educ_data,"lwage1","constant",
+                                  c("exp","minority","age","age_2","male","educ", "educ_resid"))
+reg7_stage_2$coeff_mat
+```
+Again we can see that our coefficient for educ is the same as in the IV estimation and in the 2SLS. 
+
+#### 4.) The 2SLS coefficient can also be computed by dividing the reduced-form regression coefficient with first-stage regression coefficient. Compute this ratio, defined as I did in lecture theoretically.$\\$
+```{r E5q4, message=F}
+reg8_red_form <- regressive_habits(educ_data,"lwage1","constant",
+                                   c("exp","minority","age","age_2","male","treat"))
+
+reg8_red_form$coeff_mat["treat",1]/reg6_stage_1$coeff_mat["treat",1]
+```
+We can again see that this ratio matches our estimates from the IV and 2SLS. 
+
+#### 5.) Confirm that the regression coefficients computed using the different IV strategies are basically equivalent, given that they are all measuring the same effect of education on log wages in different instrumental variable fashions. $\\$
+
+Clearly we can see from the results above that four estimates are equivalent and that each approach will result in the same estimate. The standard errors are slightly different for the different approaches however, this would not impact the estimate but would impact our confidence in its precision. 
+
+#### 6.) How does the 2SLS estimate of educ compare to the OLS estimate? How do the standard errors compare assuming homoskedasticity? Interpret these differences. $\\$
+
+Our OLS estimate was `r educ_coeff` while our 2SLS estimate was `r educ_coeff_iv`. Clearly we can see that the 2SLS estimate is lower than the OLS estimate meaning that 2SLS estimates that an additional year of education has a smaller impact on period one wages than OLS estimates. This is difference can likely be attributed to the fact that the 2SLS approach decreases the positive omitted variable bias that was present in the OLS regression for the reasons listed in question 2. $\\$
+We can also compare the standard errors:
+```{r E5q6}
+reg1$coeff_mat
+reg5_iv
+```
+We can see that across the two approaches, the standard errors are higher in the IV regression for educ than they are in the OLS regression. This makes sense given that our instrumental variable was a binary variable, and that precision in 2SLS is inversely related to the correlation of the endogenous variable and the instrument. 
+
+#### 7.) Given that we get efficiency gains with more instruments, suppose we find out that a subset of individuals lived when they were school age children in areas that were affected by unexpected tornados during the school year and we have a variable that is an indicator of whether they were hit by those random tornados and call that variable $tornado_i$. You consider now using both the Treat and Tornado variables as instruments for educ. How would you test the null of the validity of both instruments? Perform the Hausman test of overidentifying restrictions assuming homoskedastic disturbances.$\\$
+
+```{r E5q7, message=F}
+reg7_iv <- lets_take_it_to_the_stage(educ_data,"lwage1","constant","educ",c("treat", "tornado"),
+                   c("exp","minority","age","age_2","male"))
+
+educ_data <- educ_data %>% 
+  mutate(educ_iv_resid_hausman = as.numeric(reg7_iv$e))
+
+hausman <- regressive_habits(educ_data, "educ_iv_resid_hausman","constant",
+                             c("treat","tornado","exp","minority","age","age_2","male"))
+
+hausman_stat <- hausman$r_sqr*hausman$n; hausman_stat
+p_val <- pchisq(hausman_stat, 1, lower.tail = F); p_val
+```
+We can test the null of the validity of both instruments by running a Hausman test. We need to first run the 2SLS regression using $Z=[X\;\;Treat \;\;Tornado]$ and then take the residuals $\epsilon_{2SLS}$ and regress them on $Z$. Then we can derive the Hausman statistic which is equal to $NR^2$ and is distributed as a $\chi^2_{Q_1}$ where $Q_1=L_2-G_2$ which in this instance is equal to 1. $\\$
+Here we have that the our p-value from our Hausman test is `r p_val`, and thus we can reject the null hypothesis that the model is not overidentified and we need to reexamine the instruments. 
+
+### Exercise 6
+
+Let the linear model be given by $y_i = \beta\theta + x_i\beta_1+i$ where $x_i$ is distributed Normal with mean zero and std 1, and where $\epsilon_i$ is distributed normal with mean zero and standard error $\sigma = 2$, or variance $\sigma^2=4$. Let $\Theta$ be the vector of true parameters, where $\Theta = [\beta_1\beta_0\sigma^2]$. Then, we define in R a vector of true parameters $trueTheta=c(1, 5, 4)$ where the third trueTheta is the variance of e, so std error is $\sqrt{trueTheta[3, 1]} = 2$ to feed into the normal in the simulation. Define in a simulated function (expanding the one in Section 4) $y = trueT heta[1] + trueTheta[2] \ast x + \epsilon$ where $x =rnorm(N)$ and $\epsilon$ is a random normal with mean 0, and variance $\sigma^2=TrueTehat[3]$ of sample size N. In R use the $rnorm(n= tba, mean=tba,sd=tba)$ function. $\\$
+Please use R to create a simulation where you show what happens to the bias $\hat{\sigma}^2(N) -TrueTheta[3]$ where $\hat{\sigma}^2=\frac{e'e}{N}$ where $e$ is the OLS residual, as the sample changes from N=100 to N=10000 and report the histogram of the simulated distribution of the variance estimator bias for both sample size based simulations (hint follow the procedure as in section 4 where we did the exact same thing for the b ols bias as N increased from 100, 1000, and more. ) Use 10,000 as the number of simulations you do, like in section 4’s simulation. $\\$
+
+```{r E6, message=F, warning=F}
+simulation_results <- c(rep(100, 10000),rep(1000, 10000),rep(10000, 10000)) %>%
+  map_dfr(the_sims_livin_large)
+
+histogram_famous <- function(n_f){
+  histogrammable(filter(simulation_results, n==n_f), "bias",
+                 paste0("Histogram of variance bias, N=",n_f),
+                 "Bias of Variance",
+                 "Number of Observations",
+                 waiver(),waiver())
+}
+
+c(100,1000,10000) %>%
+  map(histogram_famous)
+
+```
+
+We can see that the variance of the bias decreases as the sample size increases.
+
+
+### Exercise 7 $\vspace{.1 in}$
+
+We would like to estimate the per capita quantity demanded for fish using the fish dataset covered in the empirical portion of Lecture 11 (also in section 4 notes in the end):
+$$qty_t=\beta_0+price_t\beta_1+\sum_jDays_{jt}\alpha_j+\epsilon_t$$
+
+#### 1.) Estimate the relationship given by equation (1) above by OLS including day of the business (business days of market) indicators in addition to a constant. $\\$
+
+```{r E7q1, message=F}
+reg10 <- regressive_habits(raw_fish_data, "qty","constant",
+                           c("price","day1","day2","day3","day4"))
+reg10$coeff_mat
+```
+
+#### 2.) Plot your residuals e7 against time variable (last column in the data). Just looking at them do you suspect a correlation problem? Positive? Negative? $\\$
+
+```{r E7q2m, echo=F}
+fish_data <- raw_fish_data %>% 
+  mutate(resids = as.numeric(reg10$e))
+```
+```{r E7q2p2}
+fish_data %>% 
+  ggplot(aes(x = time, y = resids)) +
+  geom_line() +
+  theme_classic() +
+  labs(title = "Residuals over Time",
+       x = "Time",
+       y = "Residuals") +
+  theme(plot.title = element_text(size = 14, face = "bold", hjust = .5))
+```
+
+The residuals seems to continuously switch from negative to positive but do not grow in size over time. It is possible that there is autocorrelation among the residuals.  
+
+#### 3.) Use the Breusch Godfrey Test to test for first order autocorrelation as in lecture. Report your test statistic and p-value. $\\$
+```{r E7q3, message=F}
+bg_test_stat <- breusch_godfrey_test(raw_fish_data, "qty","constant",
+                                     c("price","day1","day2","day3","day4"),1)
+bg_test_stat
+p_val_bg <- pchisq(bg_test_stat, df = 1, lower.tail = F)
+```
+We have that our Breusch Godfrey Test statistic is `r bg_test_stat` and should be distributed as a $\chi^2_1$. Our p-value is `r p_val_bg` and we can reject the null hypothesis that $\rho=0$. 
+
+#### 4.) Given the rule of thumb of using the number of lags $m = 0.75T^{\frac{1}{3}}$ given the sample size T (round down to the nearest integer), please report the OLS estimates and the N-W consistent std errors of the OLS estimator using the canned packages ‘”sandwich” that has newey west var cov, ‘lmtest” to test coeff after old with n-w var cov: $NW_V COV =NeweyWest(lm(Y X, mydata7), lag = m-1, prewhite = F, adjust = T)$ and $se_nw =sqrt(diag(NW_V COV ))$ or also $reg7 =lm(Y X, mydata7)$ and then $coeftest(reg7, vcov = NW_V COV )$ . No I will not ask you to code N-W (I am not that mean ;-)).Compared to the inconsistent estimated standard errors not considering autocorrelation how did the standard errors change with the N-W sandwich? $\\$
+```{r E7q4} 
+m <- floor(.75*nrow(fish_data)^(1/3))
+
+ols_est <- lm(qty~price+day1+day2+day3+day4, fish_data)
+summary(ols_est)
+var_cov_mat <- NeweyWest(ols_est, lag=m-1, prewhite=F, adjust=T)
+sqrt(diag(var_cov_mat))
+coeftest(ols_est, vcov=var_cov_mat)
+```
+We can see that our standard errors decreased from OLS estimates that did not consider autocorrelation. This will help to prevent us from rejecting a true null hypothesis. 

@@ -1,0 +1,419 @@
+---
+title: "ARE 212 - Problem Set 2"
+author: "Kendra"
+date: "2/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+rm(list = ls())
+```
+
+#### Functions
+Before I start the analysis I am going to set up a few functions that I will use later on. 
+
+```{r functions}
+
+some_stats <- function(varname, var, funname, fun){
+  list2(!!varname := list("min" = ~ min(pull(price_data, !!sym(var))),
+                          "max" = ~ max(pull(price_data, !!sym(var))),
+                          "mean (sd)" = ~ mean_sd(pull(price_data, !!sym(var)))))
+}
+
+format_it <- function(plot, title, xname, yname, xlabel, ylabel){  
+  plot +
+    scale_y_continuous(expand = c(0, 0), labels = ylabel) +
+    scale_x_continuous(labels = xlabel) +
+    theme_classic() +
+    labs(title = title,
+         x = xname,
+         y = yname) +
+    theme(text = element_text(family = "Times New Roman"),
+          plot.title = element_text(size = 14, face = "bold", hjust = .5))
+}
+
+histogrammable <- function(var, title, xname, yname, xlabel, ylabel){
+  format_it(price_data %>% 
+              ggplot(aes(x=!!sym(var))) +
+              geom_histogram(bins = 15), 
+            title, xname, yname, xlabel, ylabel)
+}
+
+scatter_brain <- function(df, xvar,yvar, title, xname, yname, xlabel, ylabel){
+  format_it(df %>% 
+              ggplot(aes(x = !!sym(xvar), y = !!sym(yvar))) +
+              geom_point(), 
+            title, xname, yname, xlabel, ylabel)
+}
+## I allow for up to 6 regressors in this function but it should be dynamic to more without changing the syntax at all
+regressive_habits <- function(df, yvar, nx, constant, x1, x2, x3, x4, x5, x6){
+  
+  x <- pull(df, !!sym(x1))
+  if(nx>1){
+    for (vars in 2:nx){
+      x <- x %>% 
+        bind_cols(pull(df, !!sym(paste0("x", vars))))
+    }
+  }
+  
+  y <- pull(df, !!sym(yvar))
+
+  m0 <- diag(1, NROW(x)) - 1/NROW(x)*rep(1, NROW(x))%*%t(rep(1, NROW(x)))
+  if(constant == "constant"){
+    x <- as.matrix(bind_cols(1, x))
+    sst <- t(y%*%m0%*%y)
+  } else {
+    x <- x
+    sst <- t(y %*% y)
+  }
+
+  b_coeff <- solve(t(x)%*%x)%*%t(x)%*%y
+  yhat <- x%*%b_coeff
+  e <- y-yhat
+  ssr <- t(e)%*%e
+  sse <- t(b_coeff)%*%t(x)%*%m0%*%x%*%b_coeff
+  r_sqr <- 1-ssr/sst
+  r_sqr_adj <- 1 - ((NROW(x)-1)/(NROW(x) - NCOL(x)))*(1-r_sqr)
+  bic <- log(t(e)%*%e/NROW(x))+NCOL(x)/NROW(x)*log(NROW(x))
+  aic <- log(t(e)%*%e/NROW(x))+2*NCOL(x)/NROW(x)
+
+  list("b_coeff" = b_coeff,
+       "n" = NROW(x),
+       "n_minus_k" = NROW(x) - NCOL(x),
+       "sst" = sst,
+       "ssr" = ssr,
+       "sse" = sse,
+       "yhat" = yhat,
+       "e" = e,
+       "r_sqr" = r_sqr,
+       "r_sqr_adj" = r_sqr_adj,
+       "bic" = bic,
+       "aic" = aic)
+}
+```
+
+#### 1.) The dataset is in Stata and was created for the purpose of this problem set only. It is available on bcourses
+and is called pset2HPRICE2.dta
+
+```{r load data}
+
+#Load libraries
+library(pacman)
+p_load(dplyr, haven, readr, knitr, psych, ggplot2,stats4, stargazer, lmSupport, magrittr, qwraps2, Jmisc, qwraps2, rlang, dataCompareR, purrr)
+
+#Set directory
+dir <- "~/Documents/First Year/ARE 212/are212-group3/problemSet2"
+setwd(dir)
+
+#Load raw data
+raw_price <- read_dta("Data/pset2HPRICE2.dta")
+
+```
+
+#### 2.) Get the summary statistics for each of variables including the new variable you just created with sample
+mean, standard deviation, minimum and maximum.
+
+```{r summary stats}
+#Start analyses - add some vars that will come in handy later
+price_data <- raw_price %>% 
+  mutate(dist2 = dist^2,
+         price10 = price*10,
+         dmeanprice = price - mean(price, na.rm = T),
+         dmeannox = nox - mean(nox, na.rm = T))
+
+describe(price_data)
+
+tex_table <- tibble(varname = c("Price", "Crime", "Nox", "Distance"), 
+            var = c("price", "crime", "nox", "dist")) %>% 
+  pmap(some_stats) %>% 
+  flatten() %>% 
+  summary_table(price_data, .); tex_table
+
+
+```
+
+#### 3.) Create a histogram for price (15 brackets) label everything, axis, add title
+
+```{r histograms}
+#Plots - same formatting standards for hist and scatter
+
+price_hist <- histogrammable("price", 
+                             "Histogram of Price", 
+                             "Price", 
+                             "Number of observations", 
+                             scales::dollar, 
+                             waiver()); price_hist
+nox_hist <- histogrammable("nox", 
+                           "Nox Distribution", 
+                           "Nox - Histogram of Nox nitrous oxide, parts per 100 million. (EPA standard 5.3)", 
+                           "Number of observations", 
+                           waiver(), 
+                           waiver()) +
+  geom_vline(xintercept =  3.5, color = "red"); nox_hist
+```
+
+
+#### 4.) Create a graph that plots price against nox but use series names, not variable names or abbreviations, so
+that the graph is very clear to anyone that sees it for the first time.
+
+```{r scatter1}
+price_nox_scatter <- scatter_brain(price_data, 
+                                   "price", 
+                                   "nox", 
+                                   "Scatter Plot of Price and Nox", 
+                                   "Median Housing Price",
+                                   "Nox", 
+                                   scales::dollar, 
+                                   waiver()); price_nox_scatter
+
+
+```
+
+
+#### 5.) Export your data as a comma delimited ascii file.
+Do you need a new package?
+
+```{r export}
+
+# write_csv(price_data, "theres_no_output_folder_so_im_not_going_to_export/price_data.csv")
+```
+
+
+#### 6.) Regress price on nox and do not include a constant. Report the coefficient. What is the R squared? Now
+multiply price by 10 call it price10 and regress it on nox. Report the coefficient on nox and the R squared
+and compare to the previous coefficient and R squared. Check if they are different in R using all.equal() 
+```{r regs, warning = FALSE}
+
+price_nox_reg_nocons <- regressive_habits(price_data, "price", 1, "noconstant", "nox")
+price10_nox_reg_nocons <- regressive_habits(price_data, "price10", 1, "noconstant", "nox")
+
+price_nox_reg_nocons[["b_coeff"]]
+price_nox_reg_nocons[["r_sqr"]]
+price10_nox_reg_nocons[["b_coeff"]]
+price10_nox_reg_nocons[["r_sqr"]]
+
+summary(rCompare(price_nox_reg_nocons,price10_nox_reg_nocons))
+#coeffs, residuals are off by a factor of 10, thats good, R-sqr matches and thats also good
+
+#Check results using lm
+check_price_nox_reg_nocons <- lm(price~nox-1, price_data)
+summary(check_price_nox_reg_nocons)
+
+rCompare(tibble(V1=check_price_nox_reg_nocons$fitted.values), tibble(V1=price_nox_reg_nocons[["yhat"]]), roundDigits = 5)
+rCompare(tibble(V1=check_price_nox_reg_nocons$residuals), tibble(V1=price_nox_reg_nocons[["e"]]), roundDigits = 5)
+
+```
+
+The regression of price10 on nox has coefficients and residuals that are off by a factor of 10 from the regression of price on nox. The R^2 and adjusted R^2 of the two regressions match. \\
+
+I was able to match the fitted values, residuals, coefficients, R^2, and adjusted R^2 that are produced by lm(). 
+
+#### 7.) Get degrees of freedom (n-k), b (the coefficient), n, R squared, R squared adjusted, BIC, AIC, SST, SSM,
+SSR from the regression of price on nox and no constant. Generate a series of the predicted values of price
+and plot those against the price data series. Compute the residuals series and plot the residuals against nox.
+What do you see in terms of fit and whether the constant variance assumption for the residuals is valid or
+not. 
+
+```{r reg_results,  warning = FALSE}
+as.data.frame(price_nox_reg_nocons[-c(7,8)]) %>% 
+  distinct()
+
+broom::glance(check_price_nox_reg_nocons)
+summary(check_price_nox_reg_nocons)
+#We can see that the R^2, adjusted R^2, and degrees of freedom match. 
+
+#Now some scatter plots:
+
+price_data_reg_results <- price_data %>% 
+  bind_cols(yhat = price_nox_reg_nocons[["yhat"]],
+            residuals = price_nox_reg_nocons[["e"]])
+
+predicted_vals_scatter <- scatter_brain(price_data_reg_results,
+                                        "price",
+                                        "yhat",
+                                        "Scatter Plot of Price and Predicted Price - Regression with no constant", 
+                                        "Median Housing Price",
+                                        "Predicted Price", 
+                                        scales::dollar, 
+                                        scales::dollar); predicted_vals_scatter
+
+resids_scatter <- scatter_brain(price_data_reg_results,
+                                "nox",
+                                "residuals",
+                                "Scatter Plot of Nox and Residuals - Regression with no constant", 
+                                "Nox", 
+                                "Fitted value",
+                                waiver(), 
+                                waiver()); resids_scatter
+
+```
+Judging from the second plot, the constant variance assumption does not seem to hold, we can see that the distribution of the residuals changes with the NOX value. They are mostly positive for small values of NOX and mostly negative for large values. 
+
+
+#### 8.) Regress price on nox and a constant, and get degrees of freedom (n-k), b (the coefficient), n, R squared,
+R squared adjusted, BIC, AIC, SST, SSM, SSR. Generate a series of the predicted values of price and plot
+those against the price data series. Compute the residuals series and plot the residuals against nox. What do
+you see in terms of fit and whether the constant variance assumption for the residuals is valid or not. Has
+the fit improved or not relative to questions 6 and 7 analysis?
+
+```{r more_regs, warning = FALSE}
+price_nox_reg_cons <- regressive_habits(price_data, "price", 1, "constant", "nox")
+
+as.data.frame(price_nox_reg_cons[-c(7,8)]) %>%
+  distinct()
+
+check_price_nox_reg_cons <- lm(price~nox, price_data)
+summary(check_price_nox_reg_cons)
+# Coeffs and R^2 and adj R^2 match again - thats still good.
+
+price_data_cons_reg_results <- price_data %>% 
+  bind_cols(yhat = price_nox_reg_cons[["yhat"]],
+            residuals = price_nox_reg_cons[["e"]])
+
+predicted_vals_cons_scatter <- scatter_brain(price_data_cons_reg_results,
+                                             "price",
+                                             "yhat",
+                                             "Scatter Plot of Price and Predicted Price - Regression with a constant", 
+                                             "Median Housing Price",
+                                             "Predicted Price", 
+                                             scales::dollar, 
+                                             scales::dollar); predicted_vals_cons_scatter
+
+resids_cons_scatter <- scatter_brain(price_data_cons_reg_results,
+                                     "nox",
+                                     "residuals",
+                                     "Scatter Plot of Nox and Residuals - Regression with a constant", 
+                                     "Nox", 
+                                     "Fitted value",
+                                     waiver(), 
+                                     waiver()); resids_cons_scatter
+
+```
+Judging from the second plot, the constant variance assumption does seem to hold much more than in the no constant regression, the distribution of the residuals seems more even for the different values of NOX.
+
+#### 9.) Demean price, call it dmeanprice and demean nox and call it dmeannox. Regress the demeaned price on
+demeaned nox variable and no constant, and compare to analysis in question 8. Why do you get this?
+Explain briefly the theorem behind this?
+
+```{r demean regs}
+dmprice_dmnox_reg_nocons <- regressive_habits(price_data, "dmeanprice", 1, "noconstant", "dmeannox")
+
+as.data.frame(dmprice_dmnox_reg_nocons[-c(7,8)]) %>% 
+  distinct()
+
+check_dmprice_dmnox_reg_nocons <- lm(dmeanprice~dmeannox-1, price_data)
+summary(check_dmprice_dmnox_reg_nocons)
+```
+We can see that these results match the b_1 coefficient and R^2 of the regression analysis with a constant from question 8. This is due to the fact that the constant effectively acts as the mean if there is only one regressor, and so the b_1 coefficient would just be the difference from the mean. In the demeaned regression, the mean has already been subtracted from each variable, and this is the same as running the regression with a constant where the constant is equal to 0. 
+
+
+#### 10.) Regress price on a constant, nox, crime, rooms, dist, and dist2. Generate a series of the predicted values
+of price and plot those against the price data series: What do you see in terms of fit? Compute the residuals
+series and plot the residuals against nox: is the constant variance assumption for the residuals valid or not.
+
+```{r even more regs, warning=F}
+
+price_nox_crime_rooms_dist_dist2_cons <- regressive_habits(price_data, "price", 5, "constant", 
+                                                           "nox", "crime", "rooms", "dist", "dist2")
+
+as.data.frame(price_nox_crime_rooms_dist_dist2_cons[-c(7,8)]) %>% 
+  distinct()
+
+price_data_controls_reg_results <- price_data %>% 
+  bind_cols(yhat = price_nox_crime_rooms_dist_dist2_cons[["yhat"]],
+            residuals = price_nox_crime_rooms_dist_dist2_cons[["e"]])
+
+predicted_vals_controls_scatter <- scatter_brain(price_data_controls_reg_results,
+                                                 "price",
+                                                 "yhat",
+                                                 "Scatter Plot of Price and Predicted Price - Regression with controls",
+                                                 "Median Housing Price",
+                                                 "Predicted Price", 
+                                                 scales::dollar, 
+                                                 scales::dollar); predicted_vals_controls_scatter
+
+resids_controls_scatter <- scatter_brain(price_data_controls_reg_results,
+                                         "nox",
+                                         "residuals",
+                                         "Scatter Plot of Nox and Residuals - Regression with a constant", 
+                                         "Nox", 
+                                         "Fitted value",
+                                         waiver(), 
+                                         waiver()); resids_controls_scatter
+
+```
+It looks to me like the constant variance assumption is more right than it has been in the previous regressions. 
+
+
+#### 11.) Regress Price on a constant, crime, rooms, dist, and dist2. Save residuals as PRICEres or Y11. Now
+regress Nox on a constant, crime, rooms, dist, and dist2. Save these residuals as NOXres or X11. Now
+regress PRICEres on NOXres (or Y11 on X11) and no constant. Report your findings. We wanted to get
+the effect of nox on housing prices, all else constant . To which coefficient of a previous question is the
+coefficient of NOXres (or X11) equal to, and why? 
+
+```{r last question}
+price_crime_rooms_dist_dist2_cons <- regressive_habits(price_data, "price", 4, "constant", 
+                                                           "crime", "rooms", "dist", "dist2")
+
+as.data.frame(price_crime_rooms_dist_dist2_cons[-c(7,8)]) %>% 
+  distinct()
+
+price_data_4controls_reg_results <- price_data %>% 
+  bind_cols(yhat = price_crime_rooms_dist_dist2_cons[["yhat"]],
+            residuals = price_crime_rooms_dist_dist2_cons[["e"]])
+
+predicted_vals_4controls_scatter <- scatter_brain(price_data_4controls_reg_results,
+                                                 "price",
+                                                 "yhat",
+                                                 "Scatter Plot of Price and Predicted Price - Regression with controls",
+                                                 "Median Housing Price",
+                                                 "Predicted Price", 
+                                                 scales::dollar, 
+                                                 scales::dollar); predicted_vals_controls_scatter
+
+resids_4controls_scatter <- scatter_brain(price_data_4controls_reg_results,
+                                         "nox",
+                                         "residuals",
+                                         "Scatter Plot of Nox and Residuals - Regression with a constant", 
+                                         "Nox", 
+                                         "Fitted value",
+                                         waiver(), 
+                                         waiver()); resids_controls_scatter
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

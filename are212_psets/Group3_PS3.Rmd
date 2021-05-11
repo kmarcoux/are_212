@@ -1,0 +1,434 @@
+---
+title: "ARE 212 - Problem Set 3"
+author: "Kendra Marcoux, Lucy Hackett, Hikari Murayama, Trevor Woolley, Yuliya Borodina, Hamza Husain"
+date: "2/26/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, tidy.opts=list(width.cutoff=80), tidy=TRUE)
+rm(list = ls())
+```
+
+#### Functions
+Before I start the analysis I am going to set up a few functions that I will use later on. 
+
+```{r functions}
+
+format_it <- function(plot, title, xname, yname, xlabel, ylabel){  
+  plot +
+    scale_y_continuous(expand = c(0, 0), labels = ylabel) +
+    scale_x_continuous(labels = xlabel) +
+    theme_classic() +
+    labs(title = title,
+         x = xname,
+         y = yname) +
+    theme(#text = element_text(family = "Times New Roman"),
+          plot.title = element_text(size = 14, face = "bold", hjust = .5))
+}
+
+scatter_brain <- function(df, xvar, yvar, title, xname, yname, xlabel, ylabel){
+  format_it(df %>% 
+              ggplot(aes(x = !!sym(xvar), y = !!sym(yvar))) +
+              geom_point(), 
+            title, xname, yname, xlabel, ylabel)
+}
+
+regressive_habits <- function(df, yvar, constant, xvar){
+  
+  x <- pull(df, !!sym(xvar[[1]])) %>% 
+    na.omit()
+  if(NROW(xvar)>1){
+    for (vars in 2:NROW(xvar)){
+      x <- x %>% 
+        bind_cols(pull(df, !!sym(xvar[[vars]])) %>% 
+                    na.omit())
+    }
+  }
+  
+  y <- pull(df, !!sym(yvar)) %>% 
+    na.omit()
+  
+  if(constant == "constant"){
+    x <- as.matrix(bind_cols(1, x))
+    m0 <- diag(1, NROW(x)) - 1/NROW(x)*rep(1, NROW(x))%*%t(rep(1, NROW(x)))
+    xnames <- append("(Intercept)", xvar)
+  } else {
+    x <- as.matrix(x)
+    m0 <- diag(1, NROW(x))
+    xnames <- xvar
+  }
+
+  b_coeff <- solve(t(x)%*%x)%*%t(x)%*%y 
+  yhat <- x%*%b_coeff
+  e <- y-yhat
+  se <- sqrt(diag(solve(t(x)%*%x)*as.numeric(t(e)%*%e)/(NROW(x) - NCOL(x))))
+  t_stat <- b_coeff/se
+  sst <- t(y%*%m0%*%y)
+  ssr <- t(e)%*%e
+  sse <- t(b_coeff)%*%t(x)%*%m0%*%x%*%b_coeff
+  r_sqr <- 1-ssr/sst
+  r_sqr_adj <- 1 - ((NROW(x)-1)/(NROW(x) - NCOL(x)))*(1-r_sqr)
+  bic <- log(t(e)%*%e/NROW(x))+NCOL(x)/NROW(x)*log(NROW(x))
+  aic <- log(t(e)%*%e/NROW(x))+2*NCOL(x)/NROW(x)
+  coeff_mat <- as.matrix(bind_cols(b_coeff, se, t_stat))
+  colnames(coeff_mat) <- c("coefficient","std. error", "t-stat")
+  rownames(coeff_mat) <- xnames
+  
+  list("coeff_mat" = coeff_mat,
+       "xmat" = x,
+       "n" = NROW(x),
+       "n_minus_k" = NROW(x) - NCOL(x),
+       "sst" = sst,
+       "ssr" = ssr,
+       "sse" = sse,
+       "yhat" = yhat,
+       "e" = e,
+       "r_sqr" = r_sqr,
+       "r_sqr_adj" = r_sqr_adj,
+       "bic" = bic,
+       "aic" = aic)
+}
+
+wheres_waldo <- function(reg, R, q) {
+  
+  (t(R%*%reg$coeff_mat[,1]-q)%*%solve(R%*%solve(t(reg$xmat)%*%reg$xmat)%*%t(R))%*%
+     (R%*%reg$coeff_mat[,1]-q))/NROW(R)/(t(reg$e)%*%reg$e/reg$n_minus_k)
+
+}
+
+veni_vidi_vifi <- function(df, constant, vif_xvars) {
+  output <- matrix()
+  for (n in 1:NROW(vif_xvars)){
+    yvar <- vif_xvars[n]
+    xvar <- vif_xvars[-n]
+    vif <- 1/(1-regressive_habits(df, yvar, constant, xvar)$r_sqr)
+    output <- bind_cols(output, !!yvar:= c(vif))
+  }
+  output[-1]
+}
+
+grandiose_legendary_spectacular <- function(df, yvar, constant, xvar, c) {
+  
+  df <- df %>% 
+    mutate(!!yvar := as.numeric(c%*%!!sym(yvar)))
+  
+  for (n in 1:NROW(xvar)) {
+    df <- df %>% 
+      mutate(!!xvar[[n]] := as.numeric(c%*%!!sym(xvar[[n]])))
+  }
+  if(constant == "constant") {
+    df <- df %>% 
+      mutate(constant = as.numeric(t(rep(1, 506)%*%c)))
+    xvar <- append("constant", xvar)
+  }
+  regressive_habits(df, yvar, "noconstant", xvar)
+}
+
+```
+
+#### 1.) The dataset is in Stata and was created for the purpose of this problem set only. It is available on bcourses
+and is called pset3HPRICE2.dta $$\\[.01in]$$
+
+```{r load data, warning=F}
+
+#Load libraries
+library(pacman)
+p_load(dplyr, haven, readr, knitr, psych, ggplot2,stats4, stargazer, lmSupport, magrittr, 
+       qwraps2, Jmisc, qwraps2, rlang, dataCompareR, purrr, tinytex)
+#tinytex::install_tinytex()
+
+#Set directory
+dir <- "~/Documents/First Year/ARE 212/are212-group3/problemSet3"
+setwd(dir)
+
+#Load raw data
+raw_price <- read_dta("Data/pset3HPRICE2.dta")
+
+nas <- sum(is.na(raw_price))
+
+price_data <- raw_price %>% 
+  mutate(lprice = log(price)) %>% 
+  filter(!is.na(price))
+
+```
+We can see that there are `r nas` observations of missing values.
+
+#### 2.) Get the summary statistics for each of price: sample mean, standard deviation, minimum and maximum.
+Construct a 99% confidence interval for the sample average of price (median housing price).$$\\[.01in]$$
+
+```{r summary stat}
+
+describe(bind_cols(price=price_data$price, lprice=price_data$lprice), skew=F)
+
+conf_interval <- price_data %>% 
+  filter(!is.na(price)) %>% 
+  mutate(lower_bound = mean(price)-qt(1-.01/2, df=n()-1)*sd(price)/(n())^.5,
+         upper_bound = mean(price)+qt(1-.01/2, df=n()-1)*sd(price)/(n())^.5) %>% 
+  distinct(lower_bound, upper_bound)
+```
+```{r print stats, echo=F}
+lower_bound <- scales::dollar(conf_interval$lower_bound)
+upper_bound <- scales::dollar(conf_interval$upper_bound)
+```
+Then we have that our 99% confidence interval for the sample average of price is (`r lower_bound`,`r upper_bound`).
+
+#### 3.) Create the scatter plot of the two variables lprice and nox. What is the estimated OLS linear model slope associated with this scatter plot? Estimate a regression to answer this.$$\\[.01in]$$
+
+```{r scatter 1, warning=F, message=F}
+lprice_nox_scatter <- scatter_brain(price_data, 
+                                    "nox", 
+                                    "lprice", 
+                                    "Scatter Plot of Nox and Log Price", 
+                                    "Nox", 
+                                    "Log Median Housing Price", 
+                                    waiver(),
+                                    waiver())
+
+lprice_nox_reg <- regressive_habits(price_data,"lprice","constant",c("nox"))
+
+```
+
+```{r print slope, echo=F}
+lprice_nox_scatter +
+  geom_abline(intercept=lprice_nox_reg$coeff_mat[1,1], slope= lprice_nox_reg$coeff_mat[2,1])
+
+lprice_nox_slope <- lprice_nox_reg$coeff_mat[2,1]
+```
+
+The slope of the OLS linear model associated with this scatter plot is `r lprice_nox_slope`.
+
+#### 4.) Regress lprice on crime and poverty rate and a constant, create the residuals elprice Regress nox on crime and poverty rate and a constant, create the residuals enox. Scatter plot the residuals elprice on vertical axis and enox on horizontal axis.
+What is the estimated OLS slope associated with this scatter plot? Estimate a regression (no constant) to answer this and explain what theorem underlies the fact that this slope is the marginal effect of nox on lprice in a regression that also features a constant, crime, and poverty rate.$$\\[.01in]$$
+
+```{r more regs, message=F, warning=F}
+lprice_crime_pov_reg <- regressive_habits(price_data, 
+                                          "lprice",
+                                          "constant", 
+                                          c("crime","ppoverty"))
+nox_crime_pov_reg <- regressive_habits(price_data, 
+                                       "nox",
+                                       "constant",
+                                       c("crime","ppoverty"))
+
+price_data <- price_data %>% 
+  mutate(elprice = as.numeric(lprice_crime_pov_reg$e),
+         enox = as.numeric(nox_crime_pov_reg$e))
+
+elprice_enox_scatter <- scatter_brain(price_data, 
+                                      "enox",
+                                      "elprice",
+                                      "Residuals of Price and Nox Scatter",
+                                      "Nox Residuals",
+                                      "Log Median Housing Price Residuals",
+                                      waiver(), 
+                                      waiver())
+
+elprice_enox_reg <- regressive_habits(price_data,"elprice","noconstant",c("enox"))
+```
+
+```{r display scatters, echo=F}
+elprice_enox_scatter+geom_abline(intercept = 0, slope = elprice_enox_reg$coeff_mat[1,1])
+
+elprice_enox_slope <- elprice_enox_reg$coeff_mat[1,1]
+```
+
+The OLS slope associated with this scatter plot is `r elprice_enox_slope`. This is a result of the Frisch-Waugh-Lovell Theorem; the coefficient of nox in the full regression is equal to the coefficient found by regressing the residuals of regressing log price on $X = intercept + crime +poverty$ on the residuals of regressing nox on these same variables.
+
+#### 5.) Why is the slope estimate in 3 not equal to the one in 4? Theoretically speaking when would they be equal? $$\\[.01in]$$
+
+The slope in estimate 3 is not equal to the slope in estimate 4 because nox is not orthogonal to crime and ppoverty. If nox were uncorrelated with both variables then the estimates in both regressions would be equal. 
+
+#### 6.) Please interpret the OLS slope point estimate size, sign of the slope estimate in 4. What is the pvalue for the estimated nox coefficient? Use the stat tables for this. And then check with pvalue6<-2*pt(t6,df), where t6 is the t stat value t6=-, and df are degrees of freedom. $$\\[.01in]$$
+
+``` {r t stat, echo=F}
+
+t_elprice_enox <- (elprice_enox_reg$coeff_mat[1,3])
+
+```
+The coefficient in 4 can be interpreted to mean that a 1 unit increase in Nox (nitrous oxide, parts per 100 million) while holding crime and poverty rates constant is associated with a 0.604 percent decrease in median housing prices. The p-value is .6001. 
+
+#### 7.) Can you reject that the marginal effect of nox on median prices is a one percent drop conditional on all else equal (constant, crime, and poverty rate)? Do five steps in Hypothesis Testing at the 5% significance level against a two sided alternative. Get critical values from the relevant stats table. $$\\[.01in]$$
+
+##### Step 1: Specify the null and alternative hypothesis in a two talied test. $$\\[.01in]$$
+
+$H_0: \beta_1=-.01$ 
+
+$H_A: \beta_1\neq-.01$
+
+##### Step 2: Construct the statistic under the null. $$\\[.01in]$$
+$t_j=\frac{(b_j-a)}{\sqrt{s^2(X'X)_j^{-1}}}$
+
+```{r hyp}
+t_j_elprice_enox <- (elprice_enox_reg$coeff_mat[1,1]+.01)/
+  ((t(elprice_enox_reg$e)%*%elprice_enox_reg$e/elprice_enox_reg$n_minus_k)*
+     solve(price_data$enox%*%price_data$enox))^(.5)
+t_j_elprice_enox
+```
+
+##### Step 3: Choose the significance level $\alpha$ and find the critical value for a two tailed test $tc^{\alpha/2}_{n-k}$ in $n-k$ the $t$ distribution tables with $(n- k)$ degrees of freedom, such that$\\$ Prob$[-tc^{\alpha/2}_{n-k}\leq t_j\leq tc^{\alpha/2}_{n-k}]=1-\alpha$ $$\\[.01in]$$
+
+Here we have that $\alpha=.05$. We have 505 degrees of freedom, so looking at the t distribution tables we find that our critical value for the two-tailed test is 1.962. 
+
+##### Step 4: Reject null if $|t_j|>tc^{\alpha/2}_{n-k}$ $$\\[.01in]$$
+
+Our estimate of $t_j$ is `r t_j_elprice_enox` and we can see that $|t_j|<1.962$ thus we cannot reject the null hypothesis.
+
+##### Step 5: Interpret. $$\\[.01in]$$
+
+We cannot reject that the marginal effect of nox on median prices is a one percent drop conditional on all else equal at the 5 percent significance level. 
+
+
+#### 8.) Estimate the sample data correlation of all these variables with each other: lprice, crime, poverty, nox, stratio.
+Suppose the population model is given by 
+$$lprice=\beta_0+ crime \beta_1 + poverty \beta_2 + nox \beta_3 + stratio \beta_4+\epsilon\;\;(8.a)$$ 
+and you estimate the model
+$$lprice=\beta_0+ crime \beta_1 + nox \beta_3 + stratio \beta_4+\epsilon\;\;(8.b)$$ 
+Based on the variables’ correlation and without estimating any regression models, would the estimated coefficient for crime in (8.b) have a negative or a positive bias? Explain briefly. $$\\[.01in]$$
+
+```{r q8}
+price_data %>% 
+  select("lprice", "crime", "ppoverty", "nox", "stratio") %>% 
+  cor()
+```
+
+Based off the correlation tables, we can see that poverty and crime are positively correlated, while both are negatively correlated with lprice. Therefore when we do not include poverty in regression (8.b) our coefficient for crime will have a negative bias. The coefficient will take attribute some of the negative effect that poverty rates have on housing prices to crime rates rather than to the omitted variable, poverty rates. 
+
+#### 9.) If I told you that research shows that police presence per capita is positively correlated with crime rate and that when including police presence per capita in addition to all factors in (8.b) the estimated crime rate estimated coefficient does not change at all. What does this imply about the sample correlation between police presence per capita and median housing prices in the sample? $$\\[.01in]$$
+
+This would tell me that police presence and median housing prices are not correlated at all. For omitted variable bias to exist, the omitted variable must be correlated with both the dependent and independent variable. 
+
+#### 10.) Suppose that research showed that police per capita is on average 5 times the crime rate. Construct that police presence variable based on this fact, and include it in a regression in addition to the crime rate and the other covariates in 8.b. Explain what happened. $$\\[.01in]$$
+
+```{r q10, message=F, fig.pos="H"}
+price_data <- price_data %>% 
+  mutate(police_pres = crime*5)
+
+# lprice_controls_reg <- regressive_habits(price_data, "lprice", "constant", 
+#                                          c("nox","crime","stratio","police_pres"))
+
+```
+When we try to run this regression we run into a problem with multi-collinearity which prevents us from taking the inverse of the $\textbf{X'X}$ matrix. This is due to the fact that the $\textbf{X}$ matrix no longer has full rank as police presence is created as a linear combination of the other dependent variables (of crime). 
+
+#### 11.) Please estimate a specification that allows you to test the following. Research shows that harmful nox is when it exceeds the EPA standard of 5.3 and thus the valuation of cleaner air would be probably different in dangerous ranges of nox, than in low ranges of nox concentration. Create an indicator (Danger) D=1 for high than 5.3 and D=0 for less equal 5.3 nox levels. The null hypothesis is that the marginal effect in nox concentration on log median prices does not differ among the harmful (D=1) and non harmful ranges (D=0). Write out the regression model that allows you to estimate and perform an hypothesis test for this null. For this question only in this problem set, you do not need to code up the matrix algebra, you may use the canned lm(lprice~…,mydata) using the specification and data variables you need by expanding the specification in 8.b. Do the five steps in Hypothesis testing at the 5% significance level. What do you conclude?
+
+```{r q11, fig.pos="H"}
+price_data <- price_data %>% 
+  mutate(danger = as.integer(nox>5.3))
+
+lprice_nox_dummy <- lm(lprice~nox+danger+crime+stratio+danger*nox, price_data)
+```
+
+
+##### Step 1: Specify the null and alternative hypothesis in a two tailed test. $$\\[.01in]$$
+$H_0: \beta_{nox*danger}=0$ 
+
+$H_A: \beta_{nox*danger}\neq0$
+
+##### Step 2: Construct the statistic under the null. $$\\[.01in]$$
+$t_j=\frac{(b_j-a)}{\sqrt{s^2(X'X)_j^{-1}}}$
+
+```{r q11 tstat}
+t_j_lprice_nox_dummy <- summary(lprice_nox_dummy)$coefficients["nox:danger","t value"]
+t_j_lprice_nox_dummy
+```
+
+##### Step 3: Choose the significance level $\alpha$ and find the critical value for a two tailed test $tc^{\alpha/2}_{n-k}$ in $n-k$ the $t$ distribution tables with $(n- k)$ degrees of freedom, such that Prop$[-tc^{\alpha/2}_{n-k}\leq t_j\leq tc^{\alpha/2}_{n-k}]=1-\alpha$ $$\\[.01in]$$
+
+Here we have that $\alpha=.05$. We have 500 degrees of freedom, so looking at the t distribution tables we find that our critical value for the two-tailed test is 1.962. 
+
+##### Step 4: Reject null if $|t_j|>tc^{\alpha/2}_{n-k}$ $$\\[.01in]$$
+
+Our estimate of $t_j$ is `r t_j_lprice_nox_dummy` and we can see that $|t_j|>1.962$ thus we can reject the null hypothesis.
+
+##### Step 5: Interpret.$$\\[.01in]$$
+
+We can reject that the marginal effect of nox on median prices is different between the group with nox levels above the EPA cutoff and the group with nox levels below the EPA cutoff. Our significance level is 5% so there is less than a 5% chance that we are falsely rejecting the hypothesis that the marginal effect is the same between the two groups. 
+
+#### 12.) Regress lprice on a constant, nox, crime, poverty, and stratio. Test the joint hypothesis that beta_crime= -0.01 and beta_ppoverty=beta_stratio and beta_stratio=3*beta_nox at the 1 percent significance level: Perform a Fit based test and then also a Wald test. Are the values of the fit and wald test statistics equal? $$\\[.01in]$$
+
+We can first run the $\textbf{fit based test}$. We need to run both restricted and unrestricted versions of our model:
+Our unrestricted model is:
+$$lprice=\beta_0+\beta_1nox+\beta_2crime+\beta_3poverty+\beta_4stratio+\epsilon$$
+while our restricted model is:
+$$lprice = \beta_0+beta_1nox-.01crime+3*\beta_1poverty+3*\beta_1stratio+\upsilon$$
+which can be re-written as:
+$$lprice+.01crime = \beta_0+\beta_1(nox+3*poverty+3*stratio)+\upsilon$$
+our statistic for the fit-based test is given by:
+$$F=\frac{(SSR_r-SSR_u)/J}{s^2}$$
+where $s^2=\frac{e'e}{n-k}$ from the unrestricted model. 
+```{r q12, message=F}
+
+unrestricted_reg <- regressive_habits(price_data, "lprice", "constant", 
+                                      c("nox","crime","ppoverty","stratio"))
+
+price_data <- price_data %>% 
+  mutate(lprice_crime = lprice + .01*crime, 
+         nox_3pov_3stratio = nox+3*ppoverty+3*stratio)
+
+restricted_reg <- regressive_habits(price_data, "lprice_crime", "constant", 
+                                    c("nox_3pov_3stratio"))
+
+f_fit_based <- ((restricted_reg$ssr-unrestricted_reg$ssr)/3)/
+  (t(unrestricted_reg$e)%*%unrestricted_reg$e/unrestricted_reg$n_minus_k)
+
+```
+Then we have that the statistic from our fit based test is `r f_fit_based`. $$\\[.01in]$$
+
+We can now compare by running a $\textbf{Wald test}$. Our null hypothesis for this test takes the form $R\beta=q$ where
+$$R=\begin{bmatrix}0&3&0&0&-1\\0&0&1&0&0\\0&0&0&1&-1\end{bmatrix}\;\text{ and }\;q=\begin{bmatrix}0\\-.01\\0\end{bmatrix}$$
+Then we have that our statistic takes the form:
+$$F=\frac{(Rb-q)'(R(X'X)^{-1}R')^{-1}(Rb-q)/J}{s^2}$$
+```{r q12wald, message=F}
+
+f_wald_test <- wheres_waldo(unrestricted_reg, 
+                            as.matrix(bind_cols(c(0,0,0),c(3,0,0),c(0,1,0),c(0,0,1),c(-1,0,-1))),
+                            c(0,-.01,0))
+```
+We can see that our statistic from the Wald test is `r f_wald_test`. It is equal to the statistic from the fit-based test.
+
+#### 13.) Will omitting rooms create an OVB problem the OLS estimator of nox? Compute the variance inflated factor (VIF) for the variable rooms to be potentially included in the (8.b) model to explain the variation in lprice. Feel free to use the lm canned function to get what you need for the VIFj, for all j. Will including this variable with the others in (8.b) result in multicollinearity problems? $$\\[.01in]$$
+
+```{r q13, message=F, warning=F}
+
+rooms_vif <- veni_vidi_vifi(price_data, 
+                            "constant",  
+                            c("nox", "crime", "stratio", "rooms"))[,"rooms"]
+
+```
+The VIF for adding rooms is `r rooms_vif`, which is not large enough to cause multicollinearity issues. 
+
+
+#### 14.) Suppose a real estate agent told you that the conditional variance in the unobserved determinants of the log prices (lprice) for nox levels higher than 5.3 is half the variance for nox levels less or equal than 5.3. 
+##### a.) Which assumption no longer holds when we derive the statistical properties of the OLS estimators for the linear model in (8.b) ?$$\\[.01in]$$
+
+Our constant variance/spherical residuals assumption would not hold if this were true. Our estimator would no longer be BLUE.
+
+##### b.) Create an indicator (Danger) D=1 for high than 5.3 and D=0 for less equal 5.3 nox levels and let the variance of the disturbance of log median house prices for D=1 be half the variance for D=0. In R create a matrix Omega, its inverse, and the positive definite matrix C such that the inverse of Omega = C C’ as derived in lecture.$$\\[.01in]$$
+
+```{r q14b}
+
+omega <- price_data %>% 
+  mutate(var = if_else(danger==1,.5,1)) %>% 
+  select(var) %>% 
+  unlist() %>% 
+  diag()
+
+omega_eig <- eigen(solve(omega))
+
+c_mat <- omega_eig$vectors%*%sqrt(diag(omega_eig$values))%*%solve(omega_eig$vectors)
+
+```
+
+##### c.) Estimate the BLUE estimator in this setting of model (8.b) and test whether the marginal effect of nox on log prices is equal to -0.01, at the 10 percent significance level.
+
+```{r q14c, message=F, warning=F}
+gls <- grandiose_legendary_spectacular(price_data,"lprice","constant",
+                                       c("nox","crime","stratio"),c_mat)
+
+b_gls <- gls$coeff_mat;b_gls
+
+t_stat_gls <- abs(gls$coeff_mat[2,3]+(.01/gls$coeff_mat[2,2]))
+
+```
+Our null hypothesis is $H_0: \beta_{nox}=-.01$ with the alternative hypothesis $H_a:\beta_{nox}\neq -.01$. The t-stat is `r t_stat_gls` and is larger than 1.62 so we can reject the null hypothesis that $\beta_{nox}=-.01$ at the 10% level. 
